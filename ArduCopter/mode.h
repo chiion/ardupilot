@@ -825,6 +825,16 @@ public:
     void angle_control_start();
     void angle_control_run();
 
+    void do_circle(const AP_Mission::Mission_Command& cmd);
+
+    void circle_start();
+    void circle_movetoedge_start(const Location &circle_center, float radius_m);
+
+    AP_Mission mission{
+        FUNCTOR_BIND_MEMBER(&ModeGuided::start_command, bool, const AP_Mission::Mission_Command &),
+        FUNCTOR_BIND_MEMBER(&ModeGuided::verify_command, bool, const AP_Mission::Mission_Command &),
+        FUNCTOR_BIND_MEMBER(&ModeGuided::exit_mission, void)};
+
 protected:
 
     const char *name() const override { return "GUIDED"; }
@@ -834,7 +844,14 @@ protected:
     int32_t wp_bearing() const override;
     float crosstrack_error() const override;
 
+    void run_autopilot() override;
+
 private:
+
+    bool start_command(const AP_Mission::Mission_Command& cmd);
+    bool verify_command(const AP_Mission::Mission_Command& cmd);
+    void exit_mission();
+
 
     // enum for GUID_OPTIONS parameter
     enum class Options : int32_t {
@@ -850,9 +867,14 @@ private:
     void pos_control_run();
     void vel_control_run();
     void posvel_control_run();
+    void circle_run();
     void set_desired_velocity_with_accel_and_fence_limits(const Vector3f& vel_des);
     void set_yaw_state(bool use_yaw, float yaw_cd, bool use_yaw_rate, float yaw_rate_cds, bool relative_angle);
     bool use_pilot_yaw(void) const;
+
+    Location loc_from_cmd(const AP_Mission::Mission_Command& cmd) const;
+
+    bool verify_circle(const AP_Mission::Mission_Command& cmd);
 
     // controls which controller is run (pos or vel):
     GuidedMode guided_mode = Guided_TakeOff;

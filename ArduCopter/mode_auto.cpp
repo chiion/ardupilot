@@ -561,6 +561,10 @@ bool ModeAuto::do_guided(const AP_Mission::Mission_Command& cmd)
             do_yaw(cmd);
             return true;
 
+        case MAV_CMD_NAV_LOITER_TURNS:
+            copter.mode_guided.do_circle(cmd);
+            return true;
+
         default:
             // reject unrecognised command
             return false;
