@@ -830,10 +830,6 @@ public:
     void circle_start();
     void circle_movetoedge_start(const Location &circle_center, float radius_m);
 
-    AP_Mission mission{
-        FUNCTOR_BIND_MEMBER(&ModeGuided::start_command, bool, const AP_Mission::Mission_Command &),
-        FUNCTOR_BIND_MEMBER(&ModeGuided::verify_command, bool, const AP_Mission::Mission_Command &),
-        FUNCTOR_BIND_MEMBER(&ModeGuided::exit_mission, void)};
 
 protected:
 
@@ -847,11 +843,6 @@ protected:
     void run_autopilot() override;
 
 private:
-
-    bool start_command(const AP_Mission::Mission_Command& cmd);
-    bool verify_command(const AP_Mission::Mission_Command& cmd);
-    void exit_mission();
-
 
     // enum for GUID_OPTIONS parameter
     enum class Options : int32_t {
@@ -874,11 +865,15 @@ private:
 
     Location loc_from_cmd(const AP_Mission::Mission_Command& cmd) const;
 
-    bool verify_circle(const AP_Mission::Mission_Command& cmd);
+    void verify_mode();
+    void verify_circle();
+    void verify_circle_move_to_edge();
 
     // controls which controller is run (pos or vel):
     GuidedMode guided_mode = Guided_TakeOff;
 
+    // Guided Loiter Turns
+    int8_t circle_max_turns;
 };
 
 

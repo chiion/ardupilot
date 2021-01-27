@@ -818,15 +818,25 @@ float ModeGuided::crosstrack_error() const
 //      called by guided_run at 100hz or more
 void ModeGuided::circle_run()
 {
+    // process pilot's yaw input
+    float target_yaw_rate = 0;
+    if (!copter.failsafe.radio && use_pilot_yaw()) {
+        // get pilot's desired yaw rate
+        target_yaw_rate = get_pilot_desired_yaw_rate(channel_yaw->get_control_in());
+        if (!is_zero(target_yaw_rate)) {
+            auto_yaw.set_mode(AUTO_YAW_HOLD);
+        }
+    }
+
     // call circle controller
-    copter.circle_nav->update();
+    copter.failsafe_terrain_set_status(copter.circle_nav->update());
 
     // call z-axis position controller
     pos_control->update_z_controller();
 
     if (auto_yaw.mode() == AUTO_YAW_HOLD) {
         // roll & pitch from waypoint controller, yaw rate from pilot
-        attitude_control->input_euler_angle_roll_pitch_yaw(copter.circle_nav->get_roll(), copter.circle_nav->get_pitch(), copter.circle_nav->get_yaw(), true);
+        attitude_control->input_euler_angle_roll_pitch_euler_rate_yaw(copter.circle_nav->get_roll(), copter.circle_nav->get_pitch(), target_yaw_rate);
     } else {
         // roll, pitch from waypoint controller, yaw heading from auto_heading()
         attitude_control->input_euler_angle_roll_pitch_yaw(copter.circle_nav->get_roll(), copter.circle_nav->get_pitch(), auto_yaw.yaw(), true);
@@ -866,6 +876,9 @@ void ModeGuided::do_circle(const AP_Mission::Mission_Command& cmd)
 {
     const Location circle_center = loc_from_cmd(cmd);
 
+    // set maximum turns
+    circle_max_turns = LOWBYTE(cmd.p1);
+
     // calculate radius
     uint8_t circle_radius_m = HIGHBYTE(cmd.p1); // circle radius held in high byte of p1
 
@@ -876,7 +889,7 @@ void ModeGuided::do_circle(const AP_Mission::Mission_Command& cmd)
 // update mission
 void ModeGuided::run_autopilot()
 {
-    mission.update();
+    verify_mode();
 }
 
 // auto_circle_start - initialises controller to fly a circle in Guided flight mode
@@ -886,10 +899,10 @@ void ModeGuided::circle_start()
     guided_mode = Guided_Circle;
 
     // initialise circle controller
-    copter.circle_nav->init(copter.circle_nav->get_center());
+    copter.circle_nav->init(copter.circle_nav->get_center(), copter.circle_nav->center_is_terrain_alt());
 
     if (auto_yaw.mode() != AUTO_YAW_ROI) {
-        auto_yaw.set_mode(AUTO_YAW_HOLD);
+        auto_yaw.set_mode(AUTO_YAW_CIRCLE);
     }
 }
 
@@ -897,14 +910,8 @@ void ModeGuided::circle_start()
 //  we assume the caller has performed all required GPS_ok checks
 void ModeGuided::circle_movetoedge_start(const Location &circle_center, float radius_m)
 {
-    // convert location to vector from ekf origin
-    Vector3f circle_center_neu;
-    if (!circle_center.get_vector_from_origin_NEU(circle_center_neu)) {
-        // default to current position and log error
-        circle_center_neu = inertial_nav.get_position();
-        AP::logger().Write_Error(LogErrorSubsystem::NAVIGATION, LogErrorCode::FAILED_CIRCLE_INIT);
-    }
-    copter.circle_nav->set_center(circle_center_neu);
+    // set circle center
+    copter.circle_nav->set_center(circle_center);
 
     // set circle radius
     if (!is_zero(radius_m)) {
@@ -934,6 +941,7 @@ void ModeGuided::circle_movetoedge_start(const Location &circle_center, float ra
         }
 
         // if we are outside the circle, point at the edge, otherwise hold yaw
+        const Vector3f &circle_center_neu = copter.circle_nav->get_center();
         const Vector3f &curr_pos = inertial_nav.get_position();
         float dist_to_center = norm(circle_center_neu.x - curr_pos.x, circle_center_neu.y - curr_pos.y);
         // initialise yaw
@@ -951,110 +959,39 @@ void ModeGuided::circle_movetoedge_start(const Location &circle_center, float ra
     }
 }
 
-// start_command - this function will be called when the ap_mission lib wishes to start a new command
-bool ModeGuided::start_command(const AP_Mission::Mission_Command& cmd)
+// verify_mode - verify guided mode
+void ModeGuided::verify_mode()
 {
-    /*
-    // To-Do: logging when new commands start/end
-    if (copter.should_log(MASK_LOG_CMD)) {
-        copter.logger.Write_Mission_Cmd(mission, cmd);
+    switch (guided_mode) {
+        case Guided_Circle:
+            verify_circle();
+            break;
+
+        case Guided_CircleMoveToEdge:
+            verify_circle_move_to_edge();
+            break;
+
+        default:
+            break;
     }
-
-    switch(cmd.id) {
-
-    ///
-    /// navigation commands
-    ///
-    case MAV_CMD_NAV_LOITER_TURNS:              //18 Loiter N Times
-        do_circle(cmd);
-        break;
-
-    default:
-        // unable to use the command, allow the vehicle to try the next command
-        return false;
-    }
-
-    */
-
-    // always return success
-    return true;
-}
-
-// verify_command - callback function called from ap-mission at 10hz or higher when a command is being run
-//      we double check that the flight mode is GUIDED to avoid the possibility of ap-mission triggering actions while we're not in GUIDED mode
-bool ModeGuided::verify_command(const AP_Mission::Mission_Command& cmd)
-{
-    if (copter.flightmode != &copter.mode_guided) {
-        return false;
-    }
-
-    bool cmd_complete = false;
-
-    switch (cmd.id) {
-    //
-    // navigation commands
-    //
-    case MAV_CMD_NAV_LOITER_TURNS:
-        cmd_complete = verify_circle(cmd);
-        break;
-
-    default:
-        // error message
-        gcs().send_text(MAV_SEVERITY_WARNING,"Skipping invalid cmd #%i",cmd.id);
-        // return true if we do not recognize the command so that we move on to the next command
-        cmd_complete = true;
-        break;
-    }
-
-
-    // send message to GCS
-    if (cmd_complete) {
-        gcs().send_mission_item_reached_message(cmd.index);
-    }
-
-    return cmd_complete;
 }
 
 // verify_circle - check if we have circled the point enough
-bool ModeGuided::verify_circle(const AP_Mission::Mission_Command& cmd)
+void ModeGuided::verify_circle() 
 {
-    // check if we've reached the edge
-    if (mode() == Guided_CircleMoveToEdge) {
-        if (copter.wp_nav->reached_wp_destination()) {
-            Vector3f circle_center;
-            if (!cmd.content.location.get_vector_from_origin_NEU(circle_center)) {
-                // should never happen
-                return true;
-            }
-            const Vector3f curr_pos = copter.inertial_nav.get_position();
-            // set target altitude if not provided
-            if (is_zero(circle_center.z)) {
-                circle_center.z = curr_pos.z;
-            }
-
-            // set lat/lon position if not provided
-            if (cmd.content.location.lat == 0 && cmd.content.location.lng == 0) {
-                circle_center.x = curr_pos.x;
-                circle_center.y = curr_pos.y;
-            }
-
-            // start circling
-            circle_start();
-        }
-        return false;
+    if (fabsf(copter.circle_nav->get_angle_total()/M_2PI) >= circle_max_turns) {
+        // stop rotation after enough turns
+        guided_mode = Guided_WP;
     }
-
-    // check if we have completed circling
-    return fabsf(copter.circle_nav->get_angle_total()/M_2PI) >= LOWBYTE(cmd.p1);
 }
 
-// exit_mission - function that is called once the mission completes
-void ModeGuided::exit_mission()
+// verify_circle_move_to_edge - check if we have reach edge or circlev
+void ModeGuided::verify_circle_move_to_edge()
 {
-    // play a tone
-    AP_Notify::events.mission_complete = 1;
+    if (copter.wp_nav->reached_wp_destination()) {
+        // start circling
+        circle_start();
+    }
 }
-
-
 
 #endif
